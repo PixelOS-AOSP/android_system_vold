@@ -173,6 +173,8 @@ class VoldNativeService : public BinderService<VoldNativeService>, public os::Bn
     binder::Status setWriteBoosterBufferFlush(bool enable, bool* _aidl_return);
     binder::Status setWriteBoosterBufferOn(bool enable, bool* _aidl_return);
     binder::Status getWriteBoosterLifeTimeEstimate(int32_t* _aidl_return);
+
+    binder::Status checkNonCeStorageKeys(std::vector<std::string>* _aidl_return) override;
 };
 
 }  // namespace vold
