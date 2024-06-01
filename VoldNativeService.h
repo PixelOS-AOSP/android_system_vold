@@ -176,6 +176,7 @@ class VoldNativeService : public BinderService<VoldNativeService>, public os::Bn
     binder::Status getWriteBoosterLifeTimeEstimate(int32_t* _aidl_return);
 
     binder::Status checkNonCeStorageKeys(std::vector<std::string>* _aidl_return) override;
+    binder::Status destroyMetadataKey(const std::string& mountPointPath) override;
 };
 
 }  // namespace vold
