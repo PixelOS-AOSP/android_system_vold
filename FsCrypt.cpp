@@ -945,7 +945,7 @@ bool fscrypt_lock_ce_storage(userid_t user_id) {
 
 static bool prepare_subdirs(const std::string& action, const std::string& volume_uuid,
                             userid_t user_id, int flags) {
-    if (0 != android::vold::ForkExecvp(
+        if (0 != android::vold::ForkExecvp(
                  std::vector<std::string>{prepare_subdirs_path, action, volume_uuid,
                                           std::to_string(user_id), std::to_string(flags)})) {
         LOG(ERROR) << "vold_prepare_subdirs failed";
@@ -1176,6 +1176,165 @@ static void erase_volume_policies(std::map<userid_t, UserPolicies>& policy_map,
     for (auto& [user_id, user_policies] : policy_map) {
         user_policies.adoptable.erase(volume_uuid);
     }
+}
+
+static bool destroy_all_adoptable_user_keys(const std::string& directory_path) {
+    namespace fs = std::filesystem;
+
+    std::error_code ec;
+    if (!fs::exists(directory_path, ec)) {
+        if (ec) {
+            LOG(ERROR) << "Unable to check directory " << directory_path << ": " << ec.message();
+            return false;
+        }
+        return true;
+    }
+
+    bool success = true;
+    fs::directory_iterator users(directory_path, ec);
+    if (ec) {
+        LOG(ERROR) << "Unable to iterate directory " << directory_path << ": " << ec.message();
+        return false;
+    }
+    for (fs::directory_iterator end; users != end; users.increment(ec)) {
+        if (ec) {
+            LOG(ERROR) << "Unable to iterate directory " << directory_path << ": " << ec.message();
+            return false;
+        }
+
+        std::error_code status_ec;
+        if (!fs::is_directory(users->symlink_status(status_ec)) || status_ec) {
+            continue;
+        }
+
+        const auto volume_keys_path = users->path() / "vold/volume_keys";
+        std::error_code volume_ec;
+        if (!fs::exists(volume_keys_path, volume_ec)) {
+            if (volume_ec) {
+                LOG(ERROR) << "Unable to check directory " << volume_keys_path << ": "
+                           << volume_ec.message();
+                success = false;
+            }
+            continue;
+        }
+
+        fs::directory_iterator volumes(volume_keys_path, volume_ec);
+        if (volume_ec) {
+            LOG(ERROR) << "Unable to iterate directory " << volume_keys_path << ": "
+                       << volume_ec.message();
+            success = false;
+            continue;
+        }
+        for (fs::directory_iterator volume_end; volumes != volume_end;
+             volumes.increment(volume_ec)) {
+            if (volume_ec) {
+                LOG(ERROR) << "Unable to iterate directory " << volume_keys_path << ": "
+                           << volume_ec.message();
+                success = false;
+                break;
+            }
+
+            std::error_code volume_status_ec;
+            if (!fs::is_directory(volumes->symlink_status(volume_status_ec)) || volume_status_ec) {
+                continue;
+            }
+
+            for (const char* key_name : {"default", "default_tmp"}) {
+                const auto key_path = volumes->path() / key_name;
+                if (android::vold::pathExists(key_path.string())) {
+                    success &= android::vold::destroyKey(key_path.string());
+                }
+            }
+        }
+    }
+    return success;
+}
+
+// Destroys persistent keys for all adopted storage without unmounting volumes or evicting loaded
+// keys. The caller powers off immediately afterwards, which clears the remaining kernel mappings.
+// Requires VolumeManager::mCryptLock.
+bool fscrypt_destroy_adoptable_storage_keys() {
+    namespace fs = std::filesystem;
+
+    bool success = true;
+
+    // The raw dm-crypt key for each adopted partition. Destroying these keys is sufficient to make
+    // both connected and disconnected adopted volumes permanently inaccessible.
+    std::error_code ec;
+    fs::directory_iterator keys(DATA_MNT_POINT "/misc/vold", ec);
+    if (ec) {
+        LOG(ERROR) << "Unable to iterate adoptable storage keys: " << ec.message();
+        success = false;
+    }
+    for (fs::directory_iterator end; keys != end; keys.increment(ec)) {
+        if (ec) {
+            LOG(ERROR) << "Unable to iterate adoptable storage keys: " << ec.message();
+            success = false;
+            break;
+        }
+
+        std::error_code status_ec;
+        if (!fs::is_regular_file(keys->symlink_status(status_ec)) || status_ec) {
+            continue;
+        }
+
+        const std::string name = keys->path().filename().string();
+        if (!android::base::StartsWith(name, "expand_") || !android::base::EndsWith(name, ".key")) {
+            continue;
+        }
+
+        const std::string key_path = keys->path().string();
+        success &= android::vold::runSecdiscardSingle(key_path);
+        if (unlink(key_path.c_str()) != 0 && errno != ENOENT) {
+            PLOG(ERROR) << "Failed to unlink adopted storage key " << key_path;
+            success = false;
+        }
+    }
+
+    success &= destroy_all_adoptable_user_keys(DATA_MNT_POINT "/misc_ce");
+    success &= destroy_all_adoptable_user_keys(DATA_MNT_POINT "/misc_de");
+
+    // These values authenticate the per-user adopted-volume keys above.
+    std::error_code volume_ec;
+    if (fs::exists(systemwide_volume_key_dir, volume_ec)) {
+        fs::directory_iterator volumes(systemwide_volume_key_dir, volume_ec);
+        if (volume_ec) {
+            LOG(ERROR) << "Unable to iterate " << systemwide_volume_key_dir << ": "
+                       << volume_ec.message();
+            success = false;
+        }
+        for (fs::directory_iterator end; volumes != end; volumes.increment(volume_ec)) {
+            if (volume_ec) {
+                LOG(ERROR) << "Unable to iterate " << systemwide_volume_key_dir << ": "
+                           << volume_ec.message();
+                success = false;
+                break;
+            }
+
+            std::error_code status_ec;
+            if (!fs::is_directory(volumes->symlink_status(status_ec)) || status_ec) {
+                continue;
+            }
+
+            const auto secdiscardable = volumes->path() / "secdiscardable";
+            if (android::vold::pathExists(secdiscardable.string())) {
+                success &= android::vold::runSecdiscardSingle(secdiscardable.string());
+            }
+
+            std::error_code remove_ec;
+            fs::remove_all(volumes->path(), remove_ec);
+            if (remove_ec) {
+                LOG(ERROR) << "Unable to remove " << volumes->path() << ": " << remove_ec.message();
+                success = false;
+            }
+        }
+    } else if (volume_ec) {
+        LOG(ERROR) << "Unable to check " << systemwide_volume_key_dir << ": "
+                   << volume_ec.message();
+        success = false;
+    }
+
+    return success;
 }
 
 // Destroys all CE and DE keys for an adoptable storage volume that is permanently going away.

@@ -37,4 +37,5 @@ bool fscrypt_prepare_user_storage(const std::string& volume_uuid, userid_t user_
 bool fscrypt_destroy_user_storage(const std::string& volume_uuid, userid_t user_id, int flags);
 
 bool fscrypt_destroy_volume_keys(const std::string& volume_uuid);
+bool fscrypt_destroy_adoptable_storage_keys();
 bool is_metadata_wrapped_key_supported();

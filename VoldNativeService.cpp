@@ -1045,6 +1045,13 @@ binder::Status VoldNativeService::destroySystemStorageKey() {
     return translateBool(fscrypt_destroy_system_key());
 }
 
+binder::Status VoldNativeService::destroyAdoptableStorageKeys() {
+    ENFORCE_SYSTEM_OR_ROOT;
+    ACQUIRE_CRYPT_LOCK;
+
+    return translateBool(fscrypt_destroy_adoptable_storage_keys());
+}
+
 binder::Status VoldNativeService::getStorageSize(int64_t* storageSize) {
     ENFORCE_SYSTEM_OR_ROOT;
     return translate(GetStorageSize(storageSize));
